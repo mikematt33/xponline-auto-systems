@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
   parseCSV,
-  parseShippingCSV,
   aggregateData,
   type AggregatedData,
   ORDERED_SIZES_KEYS,
@@ -11,27 +10,22 @@ const STORAGE_KEY = "xponline_state_v1";
 
 interface PersistedState {
   data: AggregatedData | null;
-  shippingMap: [string, number][] | null; // Map serializes to array of entries
   fileName: string | null;
-  shippingFileName: string | null;
   darkMode: boolean;
   checkedCells: Record<string, number>; // Changed to number for partial counts
   activeTab: "sort" | "earnings";
   // Earnings Settings
-  shopifyPercent?: number;
-  shopifyFixed?: number;
-  blankCosts?: number;
+  shopifyPercent?: string;
+  shopifyFixed?: string;
+  blankCosts?: string;
+  shippingCost?: string;
 }
 
 function App() {
   const [data, setData] = useState<AggregatedData | null>(null);
-  const [shippingMap, setShippingMap] = useState<Map<string, number> | null>(
-    null,
-  );
 
   const [loading, setLoading] = useState(false);
   const [fileName, setFileName] = useState<string | null>(null);
-  const [shippingFileName, setShippingFileName] = useState<string | null>(null);
 
   // Dark Mode State - Default to true
   const [darkMode, setDarkMode] = useState(true);
@@ -42,10 +36,11 @@ function App() {
   // Checklist State: Key = "rowName_size", Value = count done
   const [checkedCells, setCheckedCells] = useState<Record<string, number>>({});
 
-  // Earnings Settings
-  const [shopifyPercent, setShopifyPercent] = useState<number>(2.9);
-  const [shopifyFixed, setShopifyFixed] = useState<number>(0.3);
-  const [blankCosts, setBlankCosts] = useState<number>(0);
+  // Earnings Settings - Strings to allow clean editing (empty state)
+  const [shopifyPercent, setShopifyPercent] = useState<string>("2.9");
+  const [shopifyFixed, setShopifyFixed] = useState<string>("0.30");
+  const [blankCosts, setBlankCosts] = useState<string>("0");
+  const [shippingCost, setShippingCost] = useState<string>("0");
 
   // Filter & Sort State (Sort Order System)
   const [sortField, setSortField] = useState<"name" | "total">("name");
@@ -90,17 +85,18 @@ function App() {
         }
 
         setData(parsed.data);
-        setShippingMap(parsed.shippingMap ? new Map(parsed.shippingMap) : null);
         setFileName(parsed.fileName);
-        setShippingFileName(parsed.shippingFileName);
         setDarkMode(parsed.darkMode); // Restore theme preference
         setCheckedCells(parsed.checkedCells || {});
         setActiveTab(parsed.activeTab || "sort");
         if (parsed.shopifyPercent !== undefined)
-          setShopifyPercent(parsed.shopifyPercent);
+          setShopifyPercent(parsed.shopifyPercent.toString());
         if (parsed.shopifyFixed !== undefined)
-          setShopifyFixed(parsed.shopifyFixed);
-        if (parsed.blankCosts !== undefined) setBlankCosts(parsed.blankCosts);
+          setShopifyFixed(parsed.shopifyFixed.toString());
+        if (parsed.blankCosts !== undefined)
+          setBlankCosts(parsed.blankCosts.toString());
+        if (parsed.shippingCost !== undefined)
+          setShippingCost(parsed.shippingCost.toString());
       } catch (e) {
         console.error("Failed to load local storage", e);
       }
@@ -115,15 +111,14 @@ function App() {
     // Debounce save slightly if needed, but for now direct save is okay for small data.
     const toSave: PersistedState = {
       data,
-      shippingMap: shippingMap ? Array.from(shippingMap.entries()) : null,
       fileName,
-      shippingFileName,
       darkMode,
       checkedCells,
       activeTab,
       shopifyPercent,
       shopifyFixed,
       blankCosts,
+      shippingCost,
     };
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
@@ -132,15 +127,14 @@ function App() {
     }
   }, [
     data,
-    shippingMap,
     fileName,
-    shippingFileName,
     darkMode,
     checkedCells,
     activeTab,
     shopifyPercent,
     shopifyFixed,
     blankCosts,
+    shippingCost,
     isInitialized,
   ]);
 
@@ -161,25 +155,6 @@ function App() {
     if (!file) return;
     processFile(file);
     // Reset file input so same file can be selected again if needed
-    e.target.value = "";
-  };
-
-  const handleShippingUpload = async (
-    e: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setLoading(true);
-    setShippingFileName(file.name);
-    try {
-      const map = await parseShippingCSV(file);
-      setShippingMap(map);
-    } catch (err) {
-      console.error(err);
-      alert("Error parsing Shipping CSV");
-    } finally {
-      setLoading(false);
-    }
     e.target.value = "";
   };
 
@@ -326,22 +301,21 @@ function App() {
   const getProcessedOrders = useCallback(() => {
     if (!data) return [];
 
+    const currentShopifyPercent = parseFloat(shopifyPercent) || 0;
+    const currentShopifyFixed = parseFloat(shopifyFixed) || 0;
+
     // Merge with shipping data if available
     const orders = data.orders.map((o) => {
-      // Normalize ID lookup (remove # if needed or ensure match)
-      // Shipping map keys were normalized to have #
-      const shipping = shippingMap?.get(o.name) || 0;
-
       // Calculate Shopify Fee: (Total * % + Fixed)
-      const shopifyFeeVal = o.total * (shopifyPercent / 100) + shopifyFixed;
+      const shopifyFeeVal =
+        o.total * (currentShopifyPercent / 100) + currentShopifyFixed;
 
       return {
         ...o,
-        shippingCost: shipping,
+        // Net per order (pre-global expenses like shipping/blanks)
+        // Just deducting per-transaction fees here clearly
         shopifyFee: shopifyFeeVal,
-        // Net per order = Subtotal - Shipping - Shopify
-        // We exclude 'Blank Costs' here as it's a global input usually, unless we average it later.
-        netEarnings: o.subtotal - shipping - shopifyFeeVal,
+        netAfterFees: o.subtotal - shopifyFeeVal, // Used for sorting or display
       };
     });
 
@@ -351,7 +325,7 @@ function App() {
       if (earningsSortField === "date") {
         cmp = a.date.getTime() - b.date.getTime();
       } else {
-        cmp = a.netEarnings - b.netEarnings;
+        cmp = a.netAfterFees - b.netAfterFees;
       }
       return earningsSortDirection === "asc" ? cmp : -cmp;
     });
@@ -359,7 +333,6 @@ function App() {
     return orders;
   }, [
     data,
-    shippingMap,
     earningsSortField,
     earningsSortDirection,
     shopifyPercent,
@@ -374,7 +347,6 @@ function App() {
     const uniqueProducts = processed.length;
     const totalItems = data.grandTotal;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const topProduct = processed.reduce(
       (prev, current) => (prev.total > current.total ? prev : current),
       processed[0] || { name: "-", total: 0 },
@@ -399,15 +371,24 @@ function App() {
     // "add up subtotal" -> totalSubtotal
     // "input shipping + shopify + blank, then subtract from subtotal" -> net
 
+    const currentShippingCost = parseFloat(shippingCost) || 0;
+    const currentBlankCosts = parseFloat(blankCosts) || 0;
+
     // We sum existing per-order calculations
     const totalSubtotal = orders.reduce((acc, o) => acc + o.subtotal, 0);
-    const totalShipping = orders.reduce((acc, o) => acc + o.shippingCost, 0);
     const totalShopify = orders.reduce((acc, o) => acc + o.shopifyFee, 0);
 
-    // Net = Subtotal - Shipping - Shopify - Blanks(Global)
-    const netProfit = totalSubtotal - totalShipping - totalShopify - blankCosts;
+    // Net = Subtotal - Shipping(Global) - Shopify - Blanks(Global)
+    const netProfit =
+      totalSubtotal - currentShippingCost - totalShopify - currentBlankCosts;
 
-    return { totalSubtotal, totalShipping, totalShopify, netProfit };
+    return {
+      totalSubtotal,
+      totalShipping: currentShippingCost,
+      totalShopify,
+      netProfit,
+      totalBlank: currentBlankCosts,
+    };
   };
 
   const getProgressStats = () => {
@@ -760,10 +741,10 @@ function App() {
                                                   hasQty
                                                     ? "cursor-pointer " +
                                                       (isMax
-                                                        ? "bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 font-semibold"
+                                                        ? "bg-green-100 dark:!bg-green-900/40 text-green-700 dark:!text-green-300 font-semibold"
                                                         : isPartial
-                                                          ? "bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400 font-medium"
-                                                          : "font-bold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-800/30")
+                                                          ? "bg-yellow-50 dark:!bg-yellow-900/20 text-yellow-700 dark:!text-yellow-400 font-medium"
+                                                          : "font-bold text-blue-600 dark:!text-blue-400 bg-blue-50 dark:!bg-blue-900/20 hover:bg-blue-100 dark:hover:!bg-blue-800/30")
                                                     : "text-gray-300 dark:text-gray-600 cursor-default"
                                                 }
                                             `}
@@ -838,8 +819,8 @@ function App() {
                           </tr>
                         ))}
                         {/* Totals Row */}
-                        <tr className="bg-gray-800 dark:bg-gray-950 text-white font-bold">
-                          <td className="px-6 py-4 whitespace-nowrap text-sm sticky left-0 bg-gray-800 dark:bg-gray-950 shadow-[1px_0_0_0_rgba(255,255,255,0.1)]">
+                        <tr className="bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-white font-bold border-t-2 border-gray-200 dark:border-gray-700">
+                          <td className="px-6 py-4 whitespace-nowrap text-sm sticky left-0 bg-gray-100 dark:bg-gray-900 shadow-[1px_0_0_0_rgba(0,0,0,0.1)] dark:shadow-[1px_0_0_0_rgba(255,255,255,0.1)]">
                             TOTALS
                           </td>
                           {ORDERED_SIZES_KEYS.map((size) => (
@@ -912,8 +893,8 @@ function App() {
                               ))}
                             </tr>
                           ))}
-                        <tr className="bg-gray-800 dark:bg-gray-950 text-white font-bold">
-                          <td className="px-6 py-4 whitespace-nowrap text-sm sticky left-0 bg-gray-800 dark:bg-gray-950 shadow-[1px_0_0_0_rgba(255,255,255,0.1)]">
+                        <tr className="bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-white font-bold border-t-2 border-gray-200 dark:border-gray-700">
+                          <td className="px-6 py-4 whitespace-nowrap text-sm sticky left-0 bg-gray-100 dark:bg-gray-900 shadow-[1px_0_0_0_rgba(0,0,0,0.1)] dark:shadow-[1px_0_0_0_rgba(255,255,255,0.1)]">
                             TOTALS
                           </td>
                           {ORDERED_SIZES_KEYS.map((size) => (
@@ -986,53 +967,34 @@ function App() {
                 )}
               </div>
 
-              {/* Input 2: Shipping Orders */}
+              {/* Input 2: Shipping Orders -> Replaced with Manual Input */}
               <div className="bg-white dark:bg-gray-800 p-6 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm">
                 <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
-                  Step 2: Shipping Data
+                  Step 2: Shipping Cost
                 </h3>
-                {shippingMap ? (
-                  <div>
-                    <div className="text-sm text-green-600 dark:text-green-400 font-medium flex items-center mb-2">
-                      <svg
-                        className="w-5 h-5 mr-2"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth="2"
-                          d="M5 13l4 4L19 7"
-                        ></path>
-                      </svg>
-                      Loaded from {shippingFileName} ({shippingMap.size}{" "}
-                      entries)
-                    </div>
-                    <label className="text-xs text-blue-600 dark:text-blue-400 cursor-pointer hover:underline">
-                      Change Shipping File
-                      <input
-                        type="file"
-                        accept=".csv"
-                        onChange={handleShippingUpload}
-                        className="hidden"
-                      />
-                    </label>
-                  </div>
-                ) : (
-                  <div>
-                    <p className="text-sm text-gray-500 mb-4">
-                      Upload "Shipping charges by order id" report
-                    </p>
-                    <input
-                      type="file"
-                      accept=".csv"
-                      onChange={handleShippingUpload}
-                      className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 dark:file:bg-gray-700 dark:file:text-gray-300"
-                    />
-                  </div>
-                )}
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Total Shipping Cost ($)
+                </label>
+                <input
+                  type="text"
+                  value={shippingCost}
+                  onChange={(e) => {
+                    // Allow typing numbers or dots, or empty
+                    const val = e.target.value;
+                    if (val === "" || /^\d*\.?\d*$/.test(val)) {
+                      setShippingCost(val);
+                    }
+                  }}
+                  onBlur={() => {
+                    if (shippingCost === "" || shippingCost === ".")
+                      setShippingCost("0");
+                  }}
+                  className="w-full p-2 rounded border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500"
+                  placeholder="0.00"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Total combined shipping cost for this batch (labels etc)
+                </p>
               </div>
             </div>
 
@@ -1047,12 +1009,17 @@ function App() {
                     Total Blank Costs ($)
                   </label>
                   <input
-                    type="number"
-                    step="0.01"
+                    type="text"
                     value={blankCosts}
-                    onChange={(e) =>
-                      setBlankCosts(parseFloat(e.target.value) || 0)
-                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === "" || /^\d*\.?\d*$/.test(val))
+                        setBlankCosts(val);
+                    }}
+                    onBlur={() => {
+                      if (blankCosts === "" || blankCosts === ".")
+                        setBlankCosts("0");
+                    }}
                     className="w-full p-2 rounded border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500"
                     placeholder="0.00"
                   />
@@ -1065,12 +1032,17 @@ function App() {
                     Shopify Fee (%)
                   </label>
                   <input
-                    type="number"
-                    step="0.1"
+                    type="text"
                     value={shopifyPercent}
-                    onChange={(e) =>
-                      setShopifyPercent(parseFloat(e.target.value) || 0)
-                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === "" || /^\d*\.?\d*$/.test(val))
+                        setShopifyPercent(val);
+                    }}
+                    onBlur={() => {
+                      if (shopifyPercent === "" || shopifyPercent === ".")
+                        setShopifyPercent("0");
+                    }}
                     className="w-full p-2 rounded border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500"
                   />
                   <p className="text-xs text-gray-500 mt-1">Default: 2.9%</p>
@@ -1080,12 +1052,17 @@ function App() {
                     Shopify Fixed Fee ($)
                   </label>
                   <input
-                    type="number"
-                    step="0.01"
+                    type="text"
                     value={shopifyFixed}
-                    onChange={(e) =>
-                      setShopifyFixed(parseFloat(e.target.value) || 0)
-                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === "" || /^\d*\.?\d*$/.test(val))
+                        setShopifyFixed(val);
+                    }}
+                    onBlur={() => {
+                      if (shopifyFixed === "" || shopifyFixed === ".")
+                        setShopifyFixed("0");
+                    }}
                     className="w-full p-2 rounded border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500"
                   />
                   <p className="text-xs text-gray-500 mt-1">Default: $0.30</p>
@@ -1138,7 +1115,7 @@ function App() {
                           - Blank Cost
                         </div>
                         <div className="text-xl font-bold text-red-600 dark:text-red-400">
-                          ${(blankCosts || 0).toFixed(2)}
+                          ${parseFloat(blankCosts || "0").toFixed(2)}
                         </div>
                       </div>
                       {/* Total Profit */}
@@ -1193,10 +1170,10 @@ function App() {
                 </div>
 
                 {/* Table */}
-                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                      <thead className="bg-gray-100 dark:bg-gray-700">
+                <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700">
+                  <div>
+                    <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700 relative">
+                      <thead className="bg-gray-100 dark:bg-gray-700 sticky top-0 z-10 shadow-sm">
                         <tr>
                           <th className="px-6 py-3 text-left text-xs font-bold text-gray-500 dark:text-gray-300 uppercase tracking-wider">
                             Date
